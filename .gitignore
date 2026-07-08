@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Data & models
+data/raw/
+data/processed/
+data/alchemy/
+*.sdf
+*.xyz
+*.pt
+*.pth
+*.ckpt
+checkpoints/
+logs/
+wandb/
+mlruns/
+mlflow.db
+
+# Results (keep .md, ignore big files)
+results/figures/*.png
+results/figures/*.pdf
+*.log
+
+# Kaggle
+kaggle.json

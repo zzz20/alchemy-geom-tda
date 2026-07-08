@@ -1,0 +1,39 @@
+# Конфигурация экспериментов по умолчанию
+
+experiment:
+  name: "alchemy_painn_tda"
+  seed: 42
+  device: "cuda"  # или "cpu"
+
+data:
+  data_dir: "data/alchemy"
+  batch_size: 32
+  num_workers: 4
+  max_train: null  # null = все данные, для отладки поставить 1000
+  n_bins: 16       # TDA Betti bins
+  max_radius: 5.0  # TDA радиус фильтрации
+
+model:
+  name: "painn_tda"  # fcnn | schnet | painn | painn_tda
+  hidden_channels: 128
+  num_layers: 6
+  num_rbf: 16
+  cutoff: 5.0
+  predict_dipole: true
+  predict_polarizability: true
+  predict_gap: false
+
+training:
+  epochs: 100
+  lr: 0.001
+  weight_decay: 0.00001
+  grad_clip: 1.0
+  scheduler: "cosine"
+
+targets:
+  # Какой таргет оптимизировать
+  target: "all"  # dipole | polarizability | gap | all
+
+robustness:
+  # Шум для тестирования робастности (0 = нет шума)
+  noise_sigma: [0.0, 0.05, 0.10, 0.15]
