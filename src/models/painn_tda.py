@@ -12,10 +12,9 @@
 import torch
 import torch.nn as nn
 from torch import Tensor
-from torch_geometric.nn import PaiNN as PaiNNLayer
 from torch_geometric.utils import scatter
 
-from .painn import PaiNNModel
+from .painn import PaiNNModel, PaiNNConv, BesselBasisLayer
 from ..tda.film import FiLMNodeModulation
 
 
@@ -49,41 +48,53 @@ class PaiNNTDA(PaiNNModel):
             predict_alpha=predict_alpha,
             predict_gap=predict_gap,
         )
-        # Заменяем единый PaiNN на два блока с FiLM между ними
         if tda_film_position is None:
             tda_film_position = num_layers // 2
         self.tda_film_position = tda_film_position
 
-        self.painn_pre = PaiNNLayer(
-            hidden_channels=hidden_channels,
-            num_layers=tda_film_position,
-            num_rbf=num_rbf,
-            cutoff=cutoff,
-        )
+        # FiLM для скалярных признаков
         self.film = FiLMNodeModulation(tda_dim, hidden_channels)
-        self.painn_post = PaiNNLayer(
-            hidden_channels=hidden_channels,
-            num_layers=num_layers - tda_film_position,
-            num_rbf=num_rbf,
-            cutoff=cutoff,
-        )
 
     def forward(self, batch) -> dict[str, Tensor]:
-        """Переопределённый forward: вставляет FiLM между двумя блоками PaiNN."""
-        h = self.atom_embed(batch.x.float())  # (N, hidden)
+        """Переопределённый forward: вставляет FiLM между слоями PaiNN."""
+        N = batch.x.shape[0]
+        device = batch.x.device
 
-        # Первый блок PaiNN
-        h_s, h_v = self.painn_pre(h, batch.pos, batch.batch)
+        s = self.atom_embed(batch.x.float())
+        v = torch.zeros(N, self.hidden_channels, 3, device=device)
 
-        # FiLM модуляция скалярных признаков TDA-фичами
-        tda = batch.tda  # (B, tda_dim)
-        h_s = self.film(h_s, tda, batch.batch)
+        # Edges
+        from torch_geometric.nn import radius_graph
+        if hasattr(batch, 'edge_index') and batch.edge_index.numel() > 0:
+            edge_index = batch.edge_index
+            row, col = edge_index
+            edge_vec = batch.pos[row] - batch.pos[col]
+            edge_dist = edge_vec.norm(dim=-1)
+        else:
+            edge_index = radius_graph(batch.pos, r=self.cutoff, batch=batch.batch,
+                                      loop=False, max_num_neighbors=32)
+            row, col = edge_index
+            edge_vec = batch.pos[row] - batch.pos[col]
+            edge_dist = edge_vec.norm(dim=-1)
 
-        # Второй блок PaiNN
-        h_s, h_v = self.painn_post(h_s, h_v, batch.pos, batch.batch)
+        mask = edge_dist < self.cutoff
+        edge_index = edge_index[:, mask]
+        edge_vec = edge_vec[mask]
+        edge_dist = edge_dist[mask]
+
+        rbf = self.rbf(edge_dist)
+        edge_dir = edge_vec / (edge_dist.unsqueeze(-1) + 1e-8)
+
+        # Слои с FiLM посередине
+        for i, layer in enumerate(self.layers):
+            s, v = layer(s, v, edge_index, rbf, edge_dir)
+            # Вставляем FiLM после указанного слоя
+            if i == self.tda_film_position - 1 and hasattr(batch, 'tda'):
+                tda = batch.tda  # (B, tda_dim)
+                s = self.film(s, tda, batch.batch)
 
         # Pooling
-        mol_emb = scatter(h_s, batch.batch, dim=0, reduce="sum")
+        mol_emb = scatter(s, batch.batch, dim=0, reduce="sum")
 
         out = {}
         if self.predict_mu:
