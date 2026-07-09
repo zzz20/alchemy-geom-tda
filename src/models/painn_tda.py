@@ -1,31 +1,16 @@
-"""PaiNN + TDA: основная модель проекта.
-
-Архитектура:
-  1. TDA-фичи извлекаются из 3D координат атомов (Vietoris-Rips + Betti curves)
-  2. TDA-фичи подаются в FiLM conditioning
-  3. FiLM модулирует узловые скалярные признаки после половины слоёв PaiNN
-  4. Дальше обычный PaiNN + heads для mu/alpha/gap
-
-Эквивариантность сохраняется: TDA-фичи E(3)-инвариантны (топология не меняется
-при изометриях), FiLM модуляция γ*h + β сохраняет тип поля (скаляр остаётся скаляром).
-"""
+"""PaiNN + TDA: основная модель проекта."""
 import torch
 import torch.nn as nn
 from torch import Tensor
+from torch_geometric.nn import radius_graph
 from torch_geometric.utils import scatter
 
-from .painn import PaiNNModel, PaiNNConv, BesselBasisLayer
+from .painn import PaiNNModel, PaiNNInteraction, PaiNNMix, BesselBasisLayer, DistanceEnvelope
 from ..tda.film import FiLMNodeModulation
 
 
 class PaiNNTDA(PaiNNModel):
-    """PaiNN с интеграцией TDA-фичей через FiLM conditioning.
-
-    Args:
-        tda_dim: размерность TDA-фичей (по умолчанию 52)
-        tda_film_position: после какого слоя вставлять FiLM (по умолчанию num_layers // 2)
-        Остальные параметры как у PaiNNModel
-    """
+    """PaiNN с FiLM conditioning на TDA-фичах."""
 
     def __init__(
         self,
@@ -38,6 +23,7 @@ class PaiNNTDA(PaiNNModel):
         predict_gap: bool = True,
         tda_dim: int = 52,
         tda_film_position: int | None = None,
+        max_num_neighbors: int = 32,
     ):
         super().__init__(
             hidden_channels=hidden_channels,
@@ -47,35 +33,27 @@ class PaiNNTDA(PaiNNModel):
             predict_mu=predict_mu,
             predict_alpha=predict_alpha,
             predict_gap=predict_gap,
+            max_num_neighbors=max_num_neighbors,
         )
         if tda_film_position is None:
             tda_film_position = num_layers // 2
         self.tda_film_position = tda_film_position
-
-        # FiLM для скалярных признаков
         self.film = FiLMNodeModulation(tda_dim, hidden_channels)
 
-    def forward(self, batch) -> dict[str, Tensor]:
-        """Переопределённый forward: вставляет FiLM между слоями PaiNN."""
+    def forward(self, batch) -> dict:
         N = batch.x.shape[0]
         device = batch.x.device
 
         s = self.atom_embed(batch.x.float())
         v = torch.zeros(N, self.hidden_channels, 3, device=device)
 
-        # Edges
-        from torch_geometric.nn import radius_graph
-        if hasattr(batch, 'edge_index') and batch.edge_index.numel() > 0:
-            edge_index = batch.edge_index
-            row, col = edge_index
-            edge_vec = batch.pos[row] - batch.pos[col]
-            edge_dist = edge_vec.norm(dim=-1)
-        else:
-            edge_index = radius_graph(batch.pos, r=self.cutoff, batch=batch.batch,
-                                      loop=False, max_num_neighbors=32)
-            row, col = edge_index
-            edge_vec = batch.pos[row] - batch.pos[col]
-            edge_dist = edge_vec.norm(dim=-1)
+        edge_index = radius_graph(
+            batch.pos, r=self.cutoff, batch=batch.batch,
+            loop=False, max_num_neighbors=self.max_num_neighbors
+        )
+        row, col = edge_index
+        edge_vec = batch.pos[row] - batch.pos[col]
+        edge_dist = edge_vec.norm(dim=-1)
 
         mask = edge_dist < self.cutoff
         edge_index = edge_index[:, mask]
@@ -83,18 +61,18 @@ class PaiNNTDA(PaiNNModel):
         edge_dist = edge_dist[mask]
 
         rbf = self.rbf(edge_dist)
-        edge_dir = edge_vec / (edge_dist.unsqueeze(-1) + 1e-8)
+        edge_weight = self.envelope(edge_dist)
+        vec_ij = edge_vec / (edge_dist.unsqueeze(-1) + 1e-8)
 
-        # Слои с FiLM посередине
-        for i, layer in enumerate(self.layers):
-            s, v = layer(s, v, edge_index, rbf, edge_dir)
-            # Вставляем FiLM после указанного слоя
+        for i, (interaction, mix) in enumerate(zip(self.interactions, self.mixes)):
+            ds, dvec = interaction(s, v, edge_index, rbf, edge_weight, vec_ij)
+            s, v = mix(s, v, ds, dvec)
+            # FiLM после указанного слоя
             if i == self.tda_film_position - 1 and hasattr(batch, 'tda'):
-                tda = batch.tda  # (B, tda_dim)
+                tda = batch.tda
                 s = self.film(s, tda, batch.batch)
 
-        # Pooling
-        mol_emb = scatter(s, batch.batch, dim=0, reduce="sum")
+        mol_emb = scatter(s, batch.batch, dim=0, reduce='sum')
 
         out = {}
         if self.predict_mu:

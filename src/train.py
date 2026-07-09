@@ -181,7 +181,6 @@ def main():
     print(f"Device: {device}")
 
     logger = setup_logger("train", log_file=f"logs/{args.model}_{args.target}.log")
-
     # Загрузка датасета
     logger.info("Загрузка датасета Alchemy...")
     from dataset import AlchemyDataset
