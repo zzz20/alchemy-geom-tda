@@ -1,4 +1,4 @@
-"""EGNN + TDA v9: с Embedding и глобальными дескрипторами."""
+"""EGNN + TDA v10: корректный API egnn-pytorch."""
 import torch
 import torch.nn as nn
 from torch import Tensor
@@ -44,7 +44,11 @@ class EGNNTDA(nn.Module):
             EGNN_Sparse(
                 feats_dim=hidden_channels,
                 pos_dim=3,
-                edge_dim=1,
+                edge_attr_dim=1,
+                update_coors=True,
+                update_feats=True,
+                norm_feats=True,
+                norm_coors=False,
             )
             for _ in range(num_layers)
         ])
@@ -75,24 +79,28 @@ class EGNNTDA(nn.Module):
         atom_onehot = batch.x[:, :NUM_ATOM_TYPES]
         mass = batch.x[:, -1:]
         hist = global_add_pool(atom_onehot, batch.batch)
-        n_atoms = global_add_pool(torch.ones(mass.shape[0], 1, device=mass.device), batch.batch)
+        ones = torch.ones(mass.shape[0], 1, device=mass.device)
+        n_atoms = global_add_pool(ones, batch.batch)
         total_mass = global_add_pool(mass, batch.batch)
         return torch.cat([hist, n_atoms, total_mass], dim=-1)
 
     def forward(self, batch) -> dict[str, Tensor]:
         atom_types = batch.x[:, :NUM_ATOM_TYPES].argmax(dim=-1).long()
-        h = self.atom_embed(atom_types)
-        pos = batch.pos
+        feats = self.atom_embed(atom_types)
+        coors = batch.pos
 
         edge_index = radius_graph(
-            pos, r=self.cutoff, batch=batch.batch,
+            coors, r=self.cutoff, batch=batch.batch,
             loop=False, max_num_neighbors=64,
         )
         row, col = edge_index
-        edge_dist = (pos[row] - pos[col]).norm(dim=-1, keepdim=True)
+        edge_dist = (coors[row] - coors[col]).norm(dim=-1, keepdim=True)
 
+        # КОРРЕКТНЫЙ API: склеенный [pos, feats]
+        x = torch.cat([coors, feats], dim=-1)
         for layer in self.egnn_layers:
-            h, pos = layer(h, pos, edge_index, edge_attr=edge_dist)
+            x = layer(x, edge_index, edge_attr=edge_dist, batch=batch.batch)
+        h = x[:, 3:]  # (N, hidden)
 
         mol_emb = global_add_pool(h, batch.batch)
         global_desc = self._global_descriptors(batch)

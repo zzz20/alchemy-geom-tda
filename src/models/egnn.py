@@ -1,12 +1,12 @@
-"""EGNN v9: с Embedding для типов атомов и глобальными дескрипторами.
+"""EGNN v10: КОРРЕКТНЫЙ API egnn-pytorch.
 
-Главные отличия от v8:
-  1. atom_embed = nn.Embedding(7, hidden) — тип атома как индекс (а не Linear)
-  2. Глобальные дескрипторы молекулы (гистограмма типов + число атомов + масса)
-     подаются прямо в heads, минуя EGNN. Это даёт модели тривиальный бейзлайн:
-     "alpha ≈ 5*n_C + 3*n_O + ..." — она сможет это выучить.
-  3. radius_graph (радиус 5 Å) — все пары атомов в радиусе
-  4. Правильный API EGNN_Sparse: feats и pos отдельно
+Главные исправления относительно v9:
+  1. EGNN_Sparse принимает СКЛЕЕННЫЙ тензор [pos, feats], не два отдельных
+  2. EGNN_Sparse возвращает СКЛЕЕННЫЙ тензор [coors_out, hidden_out]
+  3. Параметр называется edge_attr_dim, а не edge_dim
+  4. Передаём batch в forward (нужен для norm_feats)
+  5. Embedding для типов атомов
+  6. Глобальные дескрипторы в heads (гистограмма + n_atoms + mass)
 """
 import torch
 import torch.nn as nn
@@ -23,7 +23,14 @@ NUM_ATOM_TYPES = 7  # H, C, N, O, F, S, Cl
 
 
 class EGNNModel(nn.Module):
-    """EGNN с Embedding и глобальными дескрипторами."""
+    """EGNN для скалярных выходов (mu, alpha, gap).
+
+    Args:
+        hidden_channels: размер скрытых признаков
+        num_layers: число слоёв EGNN
+        cutoff: радиус для radius_graph (Å)
+        predict_mu, predict_alpha, predict_gap: какие таргеты предсказывать
+    """
 
     def __init__(
         self,
@@ -45,20 +52,24 @@ class EGNNModel(nn.Module):
         self.predict_alpha = predict_alpha
         self.predict_gap = predict_gap
 
-        # Embedding атомов: индекс типа → hidden (вместо Linear)
+        # Embedding атомов
         self.atom_embed = nn.Embedding(NUM_ATOM_TYPES, hidden_channels)
 
-        # EGNN слои
+        # EGNN слои — КОРРЕКТНЫЕ ИМЕНА ПАРАМЕТРОВ
         self.egnn_layers = nn.ModuleList([
             EGNN_Sparse(
                 feats_dim=hidden_channels,
                 pos_dim=3,
-                edge_dim=1,
+                edge_attr_dim=1,       # ← НЕ edge_dim!
+                update_coors=True,     # обновляем координаты (эквивариантность)
+                update_feats=True,     # обновляем признаки
+                norm_feats=True,       # LayerNorm признаков (нужен batch)
+                norm_coors=False,      # без нормализации координат
             )
             for _ in range(num_layers)
         ])
 
-        # Размер глобальных дескрипторов: 7 (гистограмма) + 1 (n_atoms) + 1 (mass)
+        # Глобальные дескрипторы: 7 (hist) + 1 (n_atoms) + 1 (mass) = 9
         global_dim = NUM_ATOM_TYPES + 2
         head_in = hidden_channels + global_dim
 
@@ -82,40 +93,44 @@ class EGNNModel(nn.Module):
             )
 
     def _global_descriptors(self, batch) -> Tensor:
-        """Вычислить глобальные дескрипторы молекулы.
-
-        Возвращает (B, 9): [hist_C, hist_N, ..., hist_Cl, n_atoms, total_mass]
-        """
-        # x: (N, 8) — one-hot (7) + mass (1)
+        """Гистограмма типов атомов + n_atoms + total_mass. (B, 9)"""
         atom_onehot = batch.x[:, :NUM_ATOM_TYPES]  # (N, 7)
-        mass = batch.x[:, -1:]  # (N, 1)
+        mass = batch.x[:, -1:]                      # (N, 1)
 
-        # Гистограмма: сумма one-hot по узлам каждой молекулы
         hist = global_add_pool(atom_onehot, batch.batch)  # (B, 7)
-        n_atoms = global_add_pool(torch.ones(mass.shape[0], 1, device=mass.device), batch.batch)
-        total_mass = global_add_pool(mass, batch.batch)  # (B, 1)
+        ones = torch.ones(mass.shape[0], 1, device=mass.device)
+        n_atoms = global_add_pool(ones, batch.batch)       # (B, 1)
+        total_mass = global_add_pool(mass, batch.batch)    # (B, 1)
 
         return torch.cat([hist, n_atoms, total_mass], dim=-1)  # (B, 9)
 
     def forward(self, batch) -> dict[str, Tensor]:
-        # Извлекаем индекс типа атома из one-hot
+        # Индекс типа атома из one-hot
         atom_types = batch.x[:, :NUM_ATOM_TYPES].argmax(dim=-1).long()  # (N,)
 
         # Embedding
-        h = self.atom_embed(atom_types)  # (N, hidden)
-        pos = batch.pos  # (N, 3)
+        feats = self.atom_embed(atom_types)  # (N, hidden)
+        coors = batch.pos                    # (N, 3)
 
-        # radius_graph
+        # radius_graph — все пары атомов в радиусе cutoff
         edge_index = radius_graph(
-            pos, r=self.cutoff, batch=batch.batch,
+            coors, r=self.cutoff, batch=batch.batch,
             loop=False, max_num_neighbors=64,
         )
         row, col = edge_index
-        edge_dist = (pos[row] - pos[col]).norm(dim=-1, keepdim=True)  # (E, 1)
+        edge_dist = (coors[row] - coors[col]).norm(dim=-1, keepdim=True)  # (E, 1)
 
-        # EGNN слои
+        # === КОРРЕКТНЫЙ ВЫЗОВ EGNN_Sparse ===
+        # x = склеенный [pos, feats]
+        x = torch.cat([coors, feats], dim=-1)  # (N, 3 + hidden)
+
         for layer in self.egnn_layers:
-            h, pos = layer(h, pos, edge_index, edge_attr=edge_dist)
+            x = layer(x, edge_index, edge_attr=edge_dist, batch=batch.batch)
+            # x: (N, 3 + hidden) — склеенный [coors_out, hidden_out]
+
+        # Разделяем обратно
+        # coors_out = x[:, :3]  # не используем для скалярных выходов
+        h = x[:, 3:]  # (N, hidden)
 
         # Pooling
         mol_emb = global_add_pool(h, batch.batch)  # (B, hidden)

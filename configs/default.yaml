@@ -1,39 +1,46 @@
-# Конфигурация экспериментов по умолчанию
+# Конфигурация эксперимента
+# Можно использовать через: python src/train.py --config configs/default.yaml
+# Или программно в Kaggle notebook
 
 experiment:
-  name: "alchemy_painn_tda"
+  name: "alchemy_egnn_full"
   seed: 42
-  device: "cuda"  # или "cpu"
+  device: "cuda"
 
 data:
   data_dir: "data/alchemy"
-  batch_size: 32
+  batch_size: 64
   num_workers: 4
-  max_train: null  # null = все данные, для отладки поставить 1000
-  n_bins: 16       # TDA Betti bins
-  max_radius: 5.0  # TDA радиус фильтрации
+  # Лимиты молекул (null = весь датасет 202579 молекул)
+  # Для отладки: 10000 / 500 / 500
+  # Для финала: null / null / null
+  max_train: 50000       # null = все молекулы
+  max_val: 5000
+  max_test: 5000
+
+# TDA параметры
+tda:
+  n_bins: 16
+  max_radius: 5.0
 
 model:
-  name: "painn_tda"  # fcnn | schnet | painn | painn_tda
+  name: "egnn"           # fcnn | schnet | painn | painn_tda | egnn | egnn_tda
   hidden_channels: 128
-  num_layers: 6
+  num_layers: 4
   num_rbf: 16
   cutoff: 5.0
-  predict_dipole: true
-  predict_polarizability: true
-  predict_gap: false
 
 training:
-  epochs: 100
-  lr: 0.001
+  epochs: 50
+  lr: 0.0005
   weight_decay: 0.00001
   grad_clip: 1.0
   scheduler: "cosine"
 
+# Что предсказываем
 targets:
-  # Какой таргет оптимизировать
-  target: "all"  # dipole | polarizability | gap | all
+  target: "all"          # mu | alpha | gap | all
 
+# Робастность к шуму
 robustness:
-  # Шум для тестирования робастности (0 = нет шума)
   noise_sigma: [0.0, 0.05, 0.10, 0.15]
