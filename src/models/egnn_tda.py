@@ -1,11 +1,4 @@
-"""EGNN + TDA: основная модель проекта.
-
-Архитектура:
-  1. TDA-фичи извлекаются из 3D координат атомов (Vietoris-Rips + Betti curves)
-  2. EGNN кодирует геометрию через radius_graph (все атомы в радиусе 5 Å)
-  3. TDA-фичи конкатенируются с графовым эмбеддингом
-  4. Финальный MLP предсказывает mu, alpha, gap
-"""
+"""EGNN + TDA v9: с Embedding и глобальными дескрипторами."""
 import torch
 import torch.nn as nn
 from torch import Tensor
@@ -17,9 +10,11 @@ try:
 except ImportError:
     EGNN_AVAILABLE = False
 
+NUM_ATOM_TYPES = 7
+
 
 class EGNNTDA(nn.Module):
-    """EGNN с конкатенацией TDA-фичей перед финальным MLP."""
+    """EGNN + TDA + глобальные дескрипторы."""
 
     def __init__(
         self,
@@ -43,7 +38,7 @@ class EGNNTDA(nn.Module):
         self.predict_alpha = predict_alpha
         self.predict_gap = predict_gap
 
-        self.atom_embed = nn.Linear(8, hidden_channels)
+        self.atom_embed = nn.Embedding(NUM_ATOM_TYPES, hidden_channels)
 
         self.egnn_layers = nn.ModuleList([
             EGNN_Sparse(
@@ -54,7 +49,9 @@ class EGNNTDA(nn.Module):
             for _ in range(num_layers)
         ])
 
-        head_in = hidden_channels + tda_dim
+        global_dim = NUM_ATOM_TYPES + 2
+        head_in = hidden_channels + global_dim + tda_dim
+
         if predict_mu:
             self.mu_head = nn.Sequential(
                 nn.Linear(head_in, hidden_channels),
@@ -74,8 +71,17 @@ class EGNNTDA(nn.Module):
                 nn.Linear(hidden_channels, 1),
             )
 
+    def _global_descriptors(self, batch) -> Tensor:
+        atom_onehot = batch.x[:, :NUM_ATOM_TYPES]
+        mass = batch.x[:, -1:]
+        hist = global_add_pool(atom_onehot, batch.batch)
+        n_atoms = global_add_pool(torch.ones(mass.shape[0], 1, device=mass.device), batch.batch)
+        total_mass = global_add_pool(mass, batch.batch)
+        return torch.cat([hist, n_atoms, total_mass], dim=-1)
+
     def forward(self, batch) -> dict[str, Tensor]:
-        h = self.atom_embed(batch.x.float())
+        atom_types = batch.x[:, :NUM_ATOM_TYPES].argmax(dim=-1).long()
+        h = self.atom_embed(atom_types)
         pos = batch.pos
 
         edge_index = radius_graph(
@@ -89,10 +95,12 @@ class EGNNTDA(nn.Module):
             h, pos = layer(h, pos, edge_index, edge_attr=edge_dist)
 
         mol_emb = global_add_pool(h, batch.batch)
+        global_desc = self._global_descriptors(batch)
 
+        parts = [mol_emb, global_desc]
         if hasattr(batch, 'tda'):
-            tda = batch.tda
-            mol_emb = torch.cat([mol_emb, tda], dim=-1)
+            parts.append(batch.tda)
+        mol_emb = torch.cat(parts, dim=-1)
 
         out = {}
         if self.predict_mu:
