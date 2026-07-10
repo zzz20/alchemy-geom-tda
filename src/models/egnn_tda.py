@@ -2,13 +2,15 @@
 import torch
 import torch.nn as nn
 from torch import Tensor
-from torch_geometric.nn import global_add_pool, knn_graph
+from torch_geometric.nn import global_add_pool
 
 try:
     from egnn_pytorch import EGNN_Sparse
     EGNN_AVAILABLE = True
 except ImportError:
     EGNN_AVAILABLE = False
+
+from .knn import knn_graph_pytorch as knn_graph
 
 NUM_ATOM_TYPES = 7
 
@@ -45,7 +47,7 @@ class EGNNTDA(nn.Module):
                 feats_dim=hidden_channels,
                 pos_dim=3,
                 edge_attr_dim=1,
-                update_coors=True,
+                update_coors=False,    # НЕ обновляем координаты
                 update_feats=True,
                 norm_feats=True,
                 norm_coors=False,
@@ -87,7 +89,7 @@ class EGNNTDA(nn.Module):
     def forward(self, batch) -> dict[str, Tensor]:
         atom_types = batch.x[:, :NUM_ATOM_TYPES].argmax(dim=-1).long()
         feats = self.atom_embed(atom_types)
-        coors = batch.pos
+        coors = batch.pos / 5.0  # нормализация координат
 
         edge_index = knn_graph(
             coors, k=16, batch=batch.batch,

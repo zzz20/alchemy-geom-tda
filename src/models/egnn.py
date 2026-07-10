@@ -11,13 +11,15 @@
 import torch
 import torch.nn as nn
 from torch import Tensor
-from torch_geometric.nn import global_add_pool, knn_graph
+from torch_geometric.nn import global_add_pool
 
 try:
     from egnn_pytorch import EGNN_Sparse
     EGNN_AVAILABLE = True
 except ImportError:
     EGNN_AVAILABLE = False
+
+from .knn import knn_graph_pytorch as knn_graph
 
 NUM_ATOM_TYPES = 7  # H, C, N, O, F, S, Cl
 
@@ -61,10 +63,10 @@ class EGNNModel(nn.Module):
                 feats_dim=hidden_channels,
                 pos_dim=3,
                 edge_attr_dim=1,       # ← НЕ edge_dim!
-                update_coors=True,     # обновляем координаты (эквивариантность)
+                update_coors=False,    # НЕ обновляем координаты (мы предсказываем скаляры)
                 update_feats=True,     # обновляем признаки
                 norm_feats=True,       # LayerNorm признаков (нужен batch)
-                norm_coors=False,      # без нормализации координат
+                norm_coors=False,
             )
             for _ in range(num_layers)
         ])
@@ -110,9 +112,10 @@ class EGNNModel(nn.Module):
 
         # Embedding
         feats = self.atom_embed(atom_types)  # (N, hidden)
-        coors = batch.pos                    # (N, 3)
+        # Нормализуем координаты (в Alchemy они в Å, ~1-5 Å; делим на типичное значение)
+        coors = batch.pos / 5.0  # масштабируем к диапазону ~0-1
 
-        # knn_graph — k ближайших соседей (не требует pyg-lib)
+        # knn_graph — k ближайших соседей (своя реализация, без pyg-lib)
         edge_index = knn_graph(
             coors, k=16, batch=batch.batch,
             loop=False,
