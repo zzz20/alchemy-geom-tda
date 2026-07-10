@@ -67,8 +67,9 @@ def parse_args():
                    help="Лимит тестовых молекул (для отладки)")
     p.add_argument("--n_bins", type=int, default=16, help="TDA Betti bins")
     p.add_argument("--max_radius", type=float, default=5.0, help="TDA радиус")
-    p.add_argument("--patience", type=int, default=10, help="Early stopping patience")
+    p.add_argument("--patience", type=int, default=15, help="Early stopping patience")
     p.add_argument("--min_delta", type=float, default=0.0, help="Early stopping min delta")
+    p.add_argument("--lr_patience", type=int, default=5, help="ReduceLROnPlateau patience")
     return p.parse_args()
 
 
@@ -284,7 +285,7 @@ def main():
     logger.info(f"Модель: {args.model}, параметров: {n_params:,}")
 
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=args.lr_patience)
 
     if args.eval_only:
         if args.checkpoint is None:
@@ -339,7 +340,6 @@ def main():
                 for k, v in tr_metrics.items():
                     train_metric_sums[k] = train_metric_sums.get(k, 0.0) + v * batch.num_graphs
                 train_counts += batch.num_graphs
-        scheduler.step()
 
         train_avg_metrics = {k: v / max(1, train_counts) for k, v in train_metric_sums.items()}
 
@@ -347,6 +347,9 @@ def main():
         val_metrics = evaluate(model, val_loader, device, args, logger, target_stats=target_stats)
         val_loss = val_metrics.get("loss", 0)
         elapsed = time.time() - t0
+
+        # === Scheduler step (после вычисления val_loss) ===
+        scheduler.step(val_loss)
 
         logger.info(
             f"Epoch {epoch:3d}/{args.epochs} | "

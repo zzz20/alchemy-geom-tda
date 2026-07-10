@@ -24,7 +24,8 @@ def main():
     p.add_argument("--hidden_channels", type=int, default=128)
     p.add_argument("--num_layers", type=int, default=4)
     p.add_argument("--lr", type=float, default=5e-4)
-    p.add_argument("--patience", type=int, default=10)
+    p.add_argument("--patience", type=int, default=15)
+    p.add_argument("--lr_patience", type=int, default=5)
     p.add_argument("--data_dir", type=str, default="data/alchemy")
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--seed", type=int, default=42)
@@ -65,6 +66,7 @@ def main():
             '--seed', str(args.seed),
             '--data_dir', args.data_dir,
             '--patience', str(args.patience),
+            '--lr_patience', str(args.lr_patience),
         ]
 
         # TDA-специфичные параметры
