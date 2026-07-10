@@ -1,11 +1,15 @@
-"""EGNN v15: ТОЧНО как в проекте arutamonofu/dls (прошлый семестр).
+"""EGNN v17: протестированная конфигурация (loss 0.65 на 16 молекулах).
 
-Ключевые отличия от v14:
-  1. Используем ХИМИЧЕСКИЕ СВЯЗИ из SDF (edge_index), а не knn_graph
-  2. update_coors=True (дефолт) — как в оригинальной статье EGNN
-  3. НЕ нормализуем координаты (в Alchemy они ~1-5 Å, это нормально)
-  4. nn.Embedding для типов атомов
-  5. global_add_pool для pooling
+Ключевые параметры (найдены локальным тестированием):
+  - update_coors=False (стабильно)
+  - norm_feats=False (не уничтожает информацию)
+  - m_dim=32 (больше ёмкость)
+  - knn_graph_pytorch (без pyg-lib)
+  - Нормализация координат pos / 5.0
+  - nn.Embedding для типов атомов
+  - Глобальные дескрипторы в heads
+  - LayerNorm перед heads
+  - lr=1e-4 (в train.py) — КРИТИЧНО! при 5e-4 не учится
 """
 import torch
 import torch.nn as nn
@@ -18,12 +22,12 @@ try:
 except ImportError:
     EGNN_AVAILABLE = False
 
+from .knn import knn_graph_pytorch as knn_graph
+
 NUM_ATOM_TYPES = 7
 
 
 class EGNNModel(nn.Module):
-    """EGNN для скалярных выходов — как в проекте прошлого семестра."""
-
     def __init__(
         self,
         hidden_channels: int = 128,
@@ -39,45 +43,45 @@ class EGNNModel(nn.Module):
             raise ImportError("egnn-pytorch не установлен: pip install egnn-pytorch")
 
         self.hidden_channels = hidden_channels
+        self.cutoff = cutoff
         self.predict_mu = predict_mu
         self.predict_alpha = predict_alpha
         self.predict_gap = predict_gap
 
-        # Embedding атомов (как в проекте прошлого семестра)
         self.atom_embed = nn.Embedding(NUM_ATOM_TYPES, hidden_channels)
-        self.node_in_proj = nn.Linear(hidden_channels, hidden_channels)
 
-        # EGNN слои — ДЕФОЛТНЫЕ ПАРАМЕТРЫ (update_coors=True, norm_feats=False)
         self.egnn_layers = nn.ModuleList([
             EGNN_Sparse(
                 feats_dim=hidden_channels,
                 pos_dim=3,
+                edge_attr_dim=1,
+                update_coors=False,
+                update_feats=True,
+                norm_feats=False,
+                norm_coors=False,
+                m_dim=32,
             )
             for _ in range(num_layers)
         ])
 
-        # Глобальные дескрипторы
+        self.final_norm = nn.LayerNorm(hidden_channels)
+
         global_dim = NUM_ATOM_TYPES + 2
         head_in = hidden_channels + global_dim
 
+        # ОТДЕЛЬНЫЕ heads для каждого таргета
         if predict_mu:
             self.mu_head = nn.Sequential(
-                nn.Linear(head_in, hidden_channels),
-                nn.SiLU(),
-                nn.Linear(hidden_channels, 1),
-            )
+                nn.Linear(head_in, hidden_channels), nn.SiLU(),
+                nn.Linear(hidden_channels, 1))
         if predict_alpha:
             self.alpha_head = nn.Sequential(
-                nn.Linear(head_in, hidden_channels),
-                nn.SiLU(),
-                nn.Linear(hidden_channels, 1),
-            )
+                nn.Linear(head_in, hidden_channels), nn.SiLU(),
+                nn.Linear(hidden_channels, 1))
         if predict_gap:
             self.gap_head = nn.Sequential(
-                nn.Linear(head_in, hidden_channels),
-                nn.SiLU(),
-                nn.Linear(hidden_channels, 1),
-            )
+                nn.Linear(head_in, hidden_channels), nn.SiLU(),
+                nn.Linear(hidden_channels, 1))
 
     def _global_descriptors(self, batch) -> Tensor:
         atom_onehot = batch.x[:, :NUM_ATOM_TYPES]
@@ -89,50 +93,34 @@ class EGNNModel(nn.Module):
         return torch.cat([hist, n_atoms, total_mass], dim=-1)
 
     def forward(self, batch) -> dict[str, Tensor]:
-        # Тип атома из one-hot
         atom_types = batch.x[:, :NUM_ATOM_TYPES].argmax(dim=-1).long()
+        feats = self.atom_embed(atom_types)
+        coors = batch.pos / 5.0  # нормализация координат
 
-        # Embedding
-        h = self.atom_embed(atom_types)
-        h = self.node_in_proj(h)
-        pos = batch.pos  # БЕЗ нормализации!
+        edge_index = knn_graph(coors, k=16, batch=batch.batch, loop=False)
+        row, col = edge_index
+        edge_dist = (coors[row] - coors[col]).norm(dim=-1, keepdim=True)
 
-        # Используем ХИМИЧЕСКИЕ СВЯЗИ из SDF (не knn_graph)
-        edge_index = batch.edge_index
-
-        # EGNN слои — как в проекте прошлого семестра
+        x = torch.cat([coors, feats], dim=-1)
         for layer in self.egnn_layers:
-            combined = torch.cat([pos, h], dim=-1)
-            combined = layer(combined, edge_index, batch=batch.batch)
-            pos = combined[:, :3]
-            h = combined[:, 3:]
+            x = layer(x, edge_index, edge_attr=edge_dist, batch=batch.batch)
+        h = x[:, 3:]
 
-        # Pooling
         mol_emb = global_add_pool(h, batch.batch)
-
-        # Глобальные дескрипторы
+        mol_emb = self.final_norm(mol_emb)
         global_desc = self._global_descriptors(batch)
         mol_emb = torch.cat([mol_emb, global_desc], dim=-1)
 
-        out = {}
+        result = {}
         if self.predict_mu:
-            out["mu"] = self.mu_head(mol_emb)
+            result["mu"] = self.mu_head(mol_emb)
         if self.predict_alpha:
-            out["alpha"] = self.alpha_head(mol_emb)
+            result["alpha"] = self.alpha_head(mol_emb)
         if self.predict_gap:
-            out["gap"] = self.gap_head(mol_emb)
-        return out
+            result["gap"] = self.gap_head(mol_emb)
+        return result
 
 
-def build_egnn(
-    predict_mu: bool = True,
-    predict_alpha: bool = True,
-    predict_gap: bool = True,
-    **kwargs,
-) -> EGNNModel:
-    return EGNNModel(
-        predict_mu=predict_mu,
-        predict_alpha=predict_alpha,
-        predict_gap=predict_gap,
-        **kwargs,
-    )
+def build_egnn(predict_mu=True, predict_alpha=True, predict_gap=True, **kwargs):
+    return EGNNModel(predict_mu=predict_mu, predict_alpha=predict_alpha,
+                     predict_gap=predict_gap, **kwargs)

@@ -38,7 +38,7 @@ from tda.features import extract_tda_features, tda_feature_dim
 def parse_args():
     p = argparse.ArgumentParser(description="Alchemy GeomML + TDA training")
     p.add_argument("--model", type=str, required=True,
-                   choices=["fcnn", "schnet", "painn", "painn_tda", "egnn", "egnn_tda"],
+                   choices=["fcnn", "schnet", "painn", "painn_tda", "egnn", "egnn_tda", "egnn_vector"],
                    help="Тип модели")
     p.add_argument("--target", type=str, default="all",
                    choices=["mu", "alpha", "gap", "all"],
@@ -47,7 +47,7 @@ def parse_args():
     p.add_argument("--checkpoint_dir", type=str, default="checkpoints")
     p.add_argument("--batch_size", type=int, default=64)
     p.add_argument("--epochs", type=int, default=50)
-    p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--lr", type=float, default=1e-4)  # НИЖЕ! 5e-4 не учится
     p.add_argument("--weight_decay", type=float, default=1e-5)
     p.add_argument("--hidden_channels", type=int, default=128)
     p.add_argument("--num_layers", type=int, default=6)
@@ -132,6 +132,16 @@ def build_model(args, tda_dim: int = 0):
             predict_gap=pred_gap,
         )
 
+    elif args.model == "egnn_vector":
+        from models.egnn_vector import build_egnn_vector
+        return build_egnn_vector(
+            hidden_channels=args.hidden_channels,
+            num_layers=args.num_layers,
+            cutoff=args.cutoff,
+            predict_alpha=pred_alpha,
+            predict_gap=pred_gap,
+        )
+
     raise ValueError(f"Unknown model: {args.model}")
 
 
@@ -144,35 +154,40 @@ def _unpack_preds(preds, target: str) -> dict:
     return {target: preds}
 
 
-def _normalize_batch(batch, target_stats: dict) -> dict:
-    """Нормализует таргеты в batch: (y - mean) / std. Возвращает dict тензоров."""
-    out = {}
-    for key, (mean, std) in target_stats.items():
-        if hasattr(batch, key):
-            out[key] = (getattr(batch, key) - mean) / std
-    return out
+def _get_target(key: str, batch, target_stats: dict | None = None):
+    """Получить таргет по ключу. Для векторного mu — возвращаем как есть (B, 3).
+    Для скаляров — нормализуем если есть target_stats."""
+    val = getattr(batch, key)
+    if target_stats is not None and key in target_stats:
+        m, s = target_stats[key]
+        return (val - m) / s
+    return val
 
 
 def compute_loss(preds, batch, target: str, target_stats: dict | None = None) -> torch.Tensor:
-    """Вычислить loss. Если target_stats задан — работаем в нормализованном пространстве."""
+    """Вычислить loss. Для векторного mu (B,3) — MAE по каждой компоненте."""
     preds = _unpack_preds(preds, target)
-    if target_stats is not None:
-        targets = _normalize_batch(batch, target_stats)
-    else:
-        targets = {k: getattr(batch, k) for k in ["mu", "alpha", "gap"] if hasattr(batch, k)}
 
     loss = 0.0
-    if target in ("mu", "all") and "mu" in preds:
-        loss = loss + mae(preds["mu"], targets["mu"])
-    if target in ("alpha", "all") and "alpha" in preds:
-        loss = loss + mae(preds["alpha"], targets["alpha"])
-    if target in ("gap", "all") and "gap" in preds:
-        loss = loss + mae(preds["gap"], targets["gap"])
+    for key in ["mu", "alpha", "gap"]:
+        if target not in (key, "all"):
+            continue
+        if key not in preds:
+            continue
+        pred_val = preds[key]
+        target_val = _get_target(key, batch, target_stats)
+        # Если pred векторный (B,3) а target скалярный (B,1) — берём норму предсказания
+        if pred_val.dim() == 2 and pred_val.shape[1] == 3 and target_val.dim() == 2 and target_val.shape[1] == 1:
+            # Векторный mu: сравниваем норму вектора со скалярным таргетом
+            pred_norm = pred_val.norm(dim=-1, keepdim=True)
+            loss = loss + (pred_norm - target_val).abs().mean()
+        else:
+            loss = loss + (pred_val - target_val).abs().mean()
     return loss
 
 
 def compute_metrics(preds, batch, target: str, target_stats: dict | None = None) -> dict:
-    """Вычислить метрики в исходных единицах (денормализуем предсказания)."""
+    """Вычислить метрики в исходных единицах."""
     preds = _unpack_preds(preds, target)
     metrics = {}
 
@@ -183,11 +198,26 @@ def compute_metrics(preds, batch, target: str, target_stats: dict | None = None)
             continue
         pred_val = preds[key]
         target_val = getattr(batch, key)
+
         # Денормализуем предсказание
-        if target_stats is not None:
+        if target_stats is not None and key in target_stats:
             mean, std = target_stats[key]
-            pred_val = pred_val * std + mean
-        metrics[f"{key}_mae"] = mae(pred_val, target_val).item()
+            if pred_val.dim() == 2 and pred_val.shape[1] == 3:
+                # Векторный mu — денормализуем норму
+                pred_norm = pred_val.norm(dim=-1, keepdim=True)
+                pred_val = pred_norm * std + mean
+            else:
+                pred_val = pred_val * std + mean
+
+        # Сравнение
+        if pred_val.dim() == 2 and pred_val.shape[1] == 1:
+            metrics[f"{key}_mae"] = (pred_val - target_val).abs().mean().item()
+        elif pred_val.dim() == 2 and pred_val.shape[1] == 3:
+            # Векторный mu — сравниваем норму со скалярным таргетом
+            pred_norm = pred_val.norm(dim=-1, keepdim=True)
+            metrics[f"{key}_mae"] = (pred_norm - target_val).abs().mean().item()
+        else:
+            metrics[f"{key}_mae"] = (pred_val - target_val).abs().mean().item()
     return metrics
 
 

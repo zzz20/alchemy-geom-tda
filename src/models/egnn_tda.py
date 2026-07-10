@@ -1,4 +1,4 @@
-"""EGNN + TDA v15: как в проекте прошлого семестра + TDA."""
+"""EGNN + TDA v17: EGNN + TDA-фичи (конкатенация)."""
 import torch
 import torch.nn as nn
 from torch import Tensor
@@ -10,12 +10,12 @@ try:
 except ImportError:
     EGNN_AVAILABLE = False
 
+from .knn import knn_graph_pytorch as knn_graph
+
 NUM_ATOM_TYPES = 7
 
 
 class EGNNTDA(nn.Module):
-    """EGNN + TDA — как в проекте arutamonofu/dls."""
-
     def __init__(
         self,
         hidden_channels: int = 128,
@@ -32,22 +32,34 @@ class EGNNTDA(nn.Module):
             raise ImportError("egnn-pytorch не установлен: pip install egnn-pytorch")
 
         self.hidden_channels = hidden_channels
+        self.cutoff = cutoff
         self.tda_dim = tda_dim
         self.predict_mu = predict_mu
         self.predict_alpha = predict_alpha
         self.predict_gap = predict_gap
 
         self.atom_embed = nn.Embedding(NUM_ATOM_TYPES, hidden_channels)
-        self.node_in_proj = nn.Linear(hidden_channels, hidden_channels)
 
         self.egnn_layers = nn.ModuleList([
-            EGNN_Sparse(feats_dim=hidden_channels, pos_dim=3)
+            EGNN_Sparse(
+                feats_dim=hidden_channels,
+                pos_dim=3,
+                edge_attr_dim=1,
+                update_coors=False,
+                update_feats=True,
+                norm_feats=False,
+                norm_coors=False,
+                m_dim=32,
+            )
             for _ in range(num_layers)
         ])
+
+        self.final_norm = nn.LayerNorm(hidden_channels)
 
         global_dim = NUM_ATOM_TYPES + 2
         head_in = hidden_channels + global_dim + tda_dim
 
+        # ОТДЕЛЬНЫЕ heads
         if predict_mu:
             self.mu_head = nn.Sequential(
                 nn.Linear(head_in, hidden_channels), nn.SiLU(),
@@ -72,18 +84,20 @@ class EGNNTDA(nn.Module):
 
     def forward(self, batch) -> dict[str, Tensor]:
         atom_types = batch.x[:, :NUM_ATOM_TYPES].argmax(dim=-1).long()
-        h = self.atom_embed(atom_types)
-        h = self.node_in_proj(h)
-        pos = batch.pos
-        edge_index = batch.edge_index
+        feats = self.atom_embed(atom_types)
+        coors = batch.pos / 5.0
 
+        edge_index = knn_graph(coors, k=16, batch=batch.batch, loop=False)
+        row, col = edge_index
+        edge_dist = (coors[row] - coors[col]).norm(dim=-1, keepdim=True)
+
+        x = torch.cat([coors, feats], dim=-1)
         for layer in self.egnn_layers:
-            combined = torch.cat([pos, h], dim=-1)
-            combined = layer(combined, edge_index, batch=batch.batch)
-            pos = combined[:, :3]
-            h = combined[:, 3:]
+            x = layer(x, edge_index, edge_attr=edge_dist, batch=batch.batch)
+        h = x[:, 3:]
 
         mol_emb = global_add_pool(h, batch.batch)
+        mol_emb = self.final_norm(mol_emb)
         global_desc = self._global_descriptors(batch)
 
         parts = [mol_emb, global_desc]
@@ -91,27 +105,16 @@ class EGNNTDA(nn.Module):
             parts.append(batch.tda)
         mol_emb = torch.cat(parts, dim=-1)
 
-        out = {}
+        result = {}
         if self.predict_mu:
-            out["mu"] = self.mu_head(mol_emb)
+            result["mu"] = self.mu_head(mol_emb)
         if self.predict_alpha:
-            out["alpha"] = self.alpha_head(mol_emb)
+            result["alpha"] = self.alpha_head(mol_emb)
         if self.predict_gap:
-            out["gap"] = self.gap_head(mol_emb)
-        return out
+            result["gap"] = self.gap_head(mol_emb)
+        return result
 
 
-def build_egnn_tda(
-    tda_dim: int = 52,
-    predict_mu: bool = True,
-    predict_alpha: bool = True,
-    predict_gap: bool = True,
-    **kwargs,
-) -> EGNNTDA:
-    return EGNNTDA(
-        tda_dim=tda_dim,
-        predict_mu=predict_mu,
-        predict_alpha=predict_alpha,
-        predict_gap=predict_gap,
-        **kwargs,
-    )
+def build_egnn_tda(tda_dim=52, predict_mu=True, predict_alpha=True, predict_gap=True, **kwargs):
+    return EGNNTDA(tda_dim=tda_dim, predict_mu=predict_mu, predict_alpha=predict_alpha,
+                    predict_gap=predict_gap, **kwargs)
