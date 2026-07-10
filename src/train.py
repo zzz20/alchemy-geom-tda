@@ -256,13 +256,20 @@ def main():
 
     best_val = float("inf")
     Path(args.checkpoint_dir).mkdir(parents=True, exist_ok=True)
+    Path("results").mkdir(parents=True, exist_ok=True)
     ckpt_path = Path(args.checkpoint_dir) / f"{args.model}_{args.target}_best.pt"
+
+    # === История обучения для графиков ===
+    history = []
 
     for epoch in range(1, args.epochs + 1):
         t0 = time.time()
         # === Train ===
         model.train()
         train_loss = AverageMeter()
+        # Дополнительно: train метрики
+        train_metric_sums = {}
+        train_counts = 0
         for batch in train_loader:
             batch = batch.to(device)
             if args.noise > 0:
@@ -274,7 +281,16 @@ def main():
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             train_loss.update(loss.item(), batch.num_graphs)
+
+            # Train метрики (без backward, для отслеживания)
+            with torch.no_grad():
+                tr_metrics = compute_metrics(preds, batch, args.target, target_stats)
+                for k, v in tr_metrics.items():
+                    train_metric_sums[k] = train_metric_sums.get(k, 0.0) + v * batch.num_graphs
+                train_counts += batch.num_graphs
         scheduler.step()
+
+        train_avg_metrics = {k: v / max(1, train_counts) for k, v in train_metric_sums.items()}
 
         # === Validation ===
         val_metrics = evaluate(model, val_loader, device, args, logger, target_stats=target_stats)
@@ -288,6 +304,20 @@ def main():
             f"{elapsed:.1f}s"
         )
 
+        # Сохраняем историю
+        row = {
+            "epoch": epoch,
+            "train_loss": train_loss.avg,
+            "val_loss": val_loss,
+            "elapsed": elapsed,
+        }
+        for k, v in train_avg_metrics.items():
+            row[f"train_{k}"] = v
+        for k, v in val_metrics.items():
+            if k != "loss":
+                row[f"val_{k}"] = v
+        history.append(row)
+
         if val_loss < best_val:
             best_val = val_loss
             torch.save(model.state_dict(), ckpt_path)
@@ -299,6 +329,21 @@ def main():
     test_metrics = evaluate(model, test_loader, device, args, logger, prefix="test", target_stats=target_stats)
     for k, v in test_metrics.items():
         logger.info(f"  test_{k}: {v:.4f}")
+
+    # === Сохранение истории в CSV ===
+    import csv
+    csv_path = f"results/history_{args.model}_{args.target}.csv"
+    if history:
+        keys = list(history[0].keys())
+        # Добавляем test-метрики в последнюю строку
+        for k, v in test_metrics.items():
+            history[-1][f"test_{k}"] = v
+        keys.extend([f"test_{k}" for k in test_metrics.keys()])
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=keys)
+            writer.writeheader()
+            writer.writerows(history)
+        logger.info(f"История сохранена в {csv_path}")
 
 
 def evaluate(model, loader, device, args, logger, prefix="val", target_stats: dict | None = None):
