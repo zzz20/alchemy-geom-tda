@@ -30,6 +30,7 @@ def plot_training_history(
         title: заголовок (по умолчанию из имени файла)
         show: показывать ли график (plt.show())
     """
+    plt.close('all')  # Закрываем все предыдущие фигуры
     hist = pd.read_csv(csv_path)
 
     if title is None:
@@ -109,6 +110,7 @@ def compare_histories(
         labels: подписи для легенды (по умолчанию имена файлов)
         save_path: куда сохранить
     """
+    plt.close('all')  # Закрываем все предыдущие фигуры
     if labels is None:
         labels = [os.path.basename(p).replace("history_", "").replace(".csv", "") for p in csv_paths]
 

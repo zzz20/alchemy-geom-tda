@@ -34,7 +34,7 @@ def main():
 
     # Список моделей
     if args.models == "all":
-        models = ["fcnn", "schnet", "egnn", "egnn_tda", "egnn_vector"]
+        models = ["fcnn", "schnet", "egnn", "egnn_tda", "egnn_vector", "egnn_vector_tda"]
     else:
         models = args.models.split(",")
 
@@ -68,7 +68,7 @@ def main():
         ]
 
         # TDA-специфичные параметры
-        if model_name in ("egnn_tda", "painn_tda"):
+        if model_name in ("egnn_tda", "painn_tda", "egnn_vector_tda"):
             argv.extend(['--n_bins', '16'])
 
         sys.argv = argv

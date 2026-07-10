@@ -38,7 +38,7 @@ from tda.features import extract_tda_features, tda_feature_dim
 def parse_args():
     p = argparse.ArgumentParser(description="Alchemy GeomML + TDA training")
     p.add_argument("--model", type=str, required=True,
-                   choices=["fcnn", "schnet", "painn", "painn_tda", "egnn", "egnn_tda", "egnn_vector"],
+                   choices=["fcnn", "schnet", "painn", "painn_tda", "egnn", "egnn_tda", "egnn_vector", "egnn_vector_tda"],
                    help="Тип модели")
     p.add_argument("--target", type=str, default="all",
                    choices=["mu", "alpha", "gap", "all"],
@@ -144,6 +144,17 @@ def build_model(args, tda_dim: int = 0):
             predict_gap=pred_gap,
         )
 
+    elif args.model == "egnn_vector_tda":
+        from models.egnn_vector_tda import build_egnn_vector_tda
+        return build_egnn_vector_tda(
+            hidden_channels=args.hidden_channels,
+            num_layers=args.num_layers,
+            cutoff=args.cutoff,
+            tda_dim=tda_dim or tda_feature_dim(args.n_bins),
+            predict_alpha=pred_alpha,
+            predict_gap=pred_gap,
+        )
+
     raise ValueError(f"Unknown model: {args.model}")
 
 
@@ -238,7 +249,7 @@ def main():
     logger.info("Загрузка датасета Alchemy...")
     from dataset import AlchemyDataset
 
-    use_tda = args.model in ("painn_tda", "egnn_tda")
+    use_tda = args.model in ("painn_tda", "egnn_tda", "egnn_vector_tda")
     train_ds = AlchemyDataset(root=args.data_dir, split="train",
                               max_samples=args.max_train,
                               tda_features=use_tda, n_bins=args.n_bins,
@@ -266,7 +277,7 @@ def main():
     val_loader = PyGDataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
     test_loader = PyGDataLoader(test_ds, batch_size=args.batch_size, shuffle=False)
 
-    tda_dim = tda_feature_dim(args.n_bins) if args.model in ("painn_tda", "egnn_tda") else 0
+    tda_dim = tda_feature_dim(args.n_bins) if args.model in ("painn_tda", "egnn_tda", "egnn_vector_tda") else 0
 
     model = build_model(args, tda_dim=tda_dim).to(device)
     n_params = sum(p.numel() for p in model.parameters())
