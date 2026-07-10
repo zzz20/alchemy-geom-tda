@@ -151,10 +151,29 @@ def compare_histories(
 
 
 if __name__ == "__main__":
+    import glob
     p = argparse.ArgumentParser()
-    p.add_argument("--csv", type=str, required=True, help="CSV файл истории")
-    p.add_argument("--save", type=str, default=None, help="Куда сохранить PNG")
+    p.add_argument("--models", type=str, default="all", help="Список моделей через запятую или 'all'")
+    p.add_argument("--save_dir", type=str, default="results/figures", help="Куда сохранить PNG")
     p.add_argument("--no-show", action="store_true", help="Не показывать (для сервера)")
     args = p.parse_args()
 
-    plot_training_history(args.csv, save_path=args.save, show=not args.no_show)
+    if args.models == "all":
+        csvs = sorted(glob.glob("results/history_*.csv"))
+    else:
+        csvs = [f"results/history_{m}_all.csv" for m in args.models.split(",")]
+        csvs = [c for c in csvs if os.path.exists(c)]
+
+    if not csvs:
+        print("CSV файлы не найдены!")
+    else:
+        # Отдельные графики
+        for csv in csvs:
+            model_name = os.path.basename(csv).replace("history_", "").replace(".csv", "")
+            save_path = f"{args.save_dir}/{model_name}_curves.png"
+            plot_training_history(csv, save_path=save_path, show=not args.no_show)
+
+        # Сравнительный график
+        compare_csvs = csvs[:] # Копируем
+        compare_save = f"{args.save_dir}/comparison.png"
+        compare_histories(compare_csvs, save_path=compare_save, show=not args.no_show)

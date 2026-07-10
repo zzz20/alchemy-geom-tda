@@ -306,11 +306,16 @@ def main():
     # === История обучения для графиков ===
     history = []
 
-    # === Early Stopping ===
+    # === Early Stopping (многопараметрическая) ===
     from early_stopping import EarlyStopping
+    es_config = {'val_loss': 'min'}
+    if args.target in ('mu', 'all'): es_config['val_mu_mae'] = 'min'
+    if args.target in ('alpha', 'all'): es_config['val_alpha_mae'] = 'min'
+    if args.target in ('gap', 'all'): es_config['val_gap_mae'] = 'min'
+
     early_stopping = EarlyStopping(
-        metrics_config={'val_loss': 'min'},
-        stop_mode='or',
+        metrics_config=es_config,
+        stop_mode='and',  # Остановка, если НИ ОДИН параметр не улучшается
         save_metric='val_loss',
         patience=args.patience,
         min_delta=args.min_delta,
@@ -351,12 +356,29 @@ def main():
         # === Scheduler step (после вычисления val_loss) ===
         scheduler.step(val_loss)
 
-        logger.info(
+        # === Early Stopping проверка ===
+        metrics_to_track = {'val_loss': val_loss}
+        if 'mu_mae' in val_metrics: metrics_to_track['val_mu_mae'] = val_metrics['mu_mae']
+        if 'alpha_mae' in val_metrics: metrics_to_track['val_alpha_mae'] = val_metrics['alpha_mae']
+        if 'gap_mae' in val_metrics: metrics_to_track['val_gap_mae'] = val_metrics['gap_mae']
+
+        prev_best = early_stopping.best_values['val_loss']
+        stop = early_stopping(metrics_to_track, model)
+        curr_best = early_stopping.best_values['val_loss']
+        
+        # Счётчик для лога (берём по val_loss, так как это save_metric)
+        es_counter = early_stopping.counters['val_loss']
+
+        log_msg = (
             f"Epoch {epoch:3d}/{args.epochs} | "
             f"train_loss={train_loss.avg:.4f} | val_loss={val_loss:.4f} | "
             f"{' | '.join(f'{k}={v:.4f}' for k, v in val_metrics.items() if k != 'loss')} | "
+            f"ES=[{es_counter}/{args.patience}] | "
             f"{elapsed:.1f}s"
         )
+        if curr_best < prev_best:
+            log_msg += " | → Сохранён best checkpoint"
+        logger.info(log_msg)
 
         row = {
             "epoch": epoch,
@@ -371,8 +393,6 @@ def main():
                 row[f"val_{k}"] = v
         history.append(row)
 
-        # === Early Stopping проверка ===
-        stop = early_stopping({'val_loss': val_loss}, model)
         if stop:
             logger.info(f"  → Early stopping на эпохе {epoch} (patience={args.patience})")
             break

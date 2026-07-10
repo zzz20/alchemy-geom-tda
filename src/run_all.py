@@ -16,10 +16,10 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 def main():
     p = argparse.ArgumentParser(description="Run all models")
-    p.add_argument("--epochs", type=int, default=100)
-    p.add_argument("--max_train", type=int, default=10000)
-    p.add_argument("--max_val", type=int, default=1000)
-    p.add_argument("--max_test", type=int, default=1000)
+    p.add_argument("--epochs", type=int, default=300)
+    p.add_argument("--max_train", type=int, default=None)
+    p.add_argument("--max_val", type=int, default=None)
+    p.add_argument("--max_test", type=int, default=None)
     p.add_argument("--batch_size", type=int, default=256)
     p.add_argument("--hidden_channels", type=int, default=128)
     p.add_argument("--num_layers", type=int, default=4)
@@ -55,9 +55,6 @@ def main():
             '--model', model_name,
             '--target', 'all',
             '--epochs', str(args.epochs),
-            '--max_train', str(args.max_train),
-            '--max_val', str(args.max_val),
-            '--max_test', str(args.max_test),
             '--batch_size', str(args.batch_size),
             '--hidden_channels', str(args.hidden_channels),
             '--num_layers', str(args.num_layers),
@@ -68,6 +65,14 @@ def main():
             '--patience', str(args.patience),
             '--lr_patience', str(args.lr_patience),
         ]
+
+        # Передаём max_ параметры только если они заданы (не None)
+        if args.max_train is not None:
+            argv.extend(['--max_train', str(args.max_train)])
+        if args.max_val is not None:
+            argv.extend(['--max_val', str(args.max_val)])
+        if args.max_test is not None:
+            argv.extend(['--max_test', str(args.max_test)])
 
         # TDA-специфичные параметры
         if model_name in ("egnn_tda", "painn_tda", "egnn_vector_tda"):

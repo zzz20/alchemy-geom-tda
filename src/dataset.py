@@ -1,7 +1,7 @@
 """
 PyG датасет для Alchemy.
 
-ИСПРАВЛЕНО v24:
+ИСПРАВЛЕНО v26:
   1. Утечка данных — train/val/test теперь используют РАЗНЫЕ молекулы
   2. Размеры val/test — max_val=1000 даёт 1000, а не 100
   3. Логика: сначала split всего датасета, потом ограничение размеров
@@ -67,7 +67,7 @@ class AlchemyDataset(InMemoryDataset):
             suffix += f"_max{self.max_samples}"
         if self.tda_features:
             suffix += f"_tda{self.n_bins}"
-        return [f"alchemy_v24{suffix}.pt"]
+        return [f"alchemy_v26{suffix}.pt"]
 
     def download(self):
         if not (Path(self.root) / "Alchemy-v20191129").exists():
