@@ -55,6 +55,7 @@ class EGNNTDA(nn.Module):
         ])
 
         self.final_norm = nn.LayerNorm(hidden_channels)
+        self.global_norm = nn.LayerNorm(NUM_ATOM_TYPES + 2)
 
         global_dim = NUM_ATOM_TYPES + 2
         head_in = hidden_channels + global_dim + tda_dim
@@ -99,6 +100,7 @@ class EGNNTDA(nn.Module):
         mol_emb = global_add_pool(h, batch.batch)
         mol_emb = self.final_norm(mol_emb)
         global_desc = self._global_descriptors(batch)
+        global_desc = self.global_norm(global_desc)
 
         parts = [mol_emb, global_desc]
         if hasattr(batch, 'tda'):

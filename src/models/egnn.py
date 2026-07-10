@@ -69,6 +69,10 @@ class EGNNModel(nn.Module):
         global_dim = NUM_ATOM_TYPES + 2
         head_in = hidden_channels + global_dim
 
+        # Нормализация глобальных дескрипторов (критично!)
+        # Без этого mass~300 доминирует над mol_emb~1 после LayerNorm
+        self.global_norm = nn.LayerNorm(global_dim)
+
         # ОТДЕЛЬНЫЕ heads для каждого таргета
         if predict_mu:
             self.mu_head = nn.Sequential(
@@ -109,6 +113,7 @@ class EGNNModel(nn.Module):
         mol_emb = global_add_pool(h, batch.batch)
         mol_emb = self.final_norm(mol_emb)
         global_desc = self._global_descriptors(batch)
+        global_desc = self.global_norm(global_desc)  # Нормализация!
         mol_emb = torch.cat([mol_emb, global_desc], dim=-1)
 
         result = {}

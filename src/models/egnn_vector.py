@@ -82,6 +82,7 @@ class EGNNVectorModel(nn.Module):
         ])
 
         self.final_norm = nn.LayerNorm(hidden_channels)
+        self.global_norm = nn.LayerNorm(NUM_ATOM_TYPES + 2)
 
         # Charge head: предсказывает заряд q_i для каждого атома из его признаков
         # q_i ∈ R (скаляр) — это будет вес для позиции атома
@@ -155,6 +156,7 @@ class EGNNVectorModel(nn.Module):
         mol_emb = global_add_pool(h, batch.batch)
         mol_emb = self.final_norm(mol_emb)
         global_desc = self._global_descriptors(batch)
+        global_desc = self.global_norm(global_desc)
         mol_emb = torch.cat([mol_emb, global_desc], dim=-1)
 
         out = {"mu": mu}  # (B, 3) — вектор!
