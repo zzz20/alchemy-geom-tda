@@ -144,7 +144,7 @@ class AlchemyDataset(InMemoryDataset):
                 tda = extract_tda_features(
                     arr["pos"], n_bins=self.n_bins, max_radius=self.max_radius
                 )
-                data.tda = torch.from_numpy(tda)
+                data.tda = torch.from_numpy(tda).unsqueeze(0)  # (1, 52) — для PyG батчинга
 
             data_list.append(data)
 
