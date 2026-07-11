@@ -375,26 +375,31 @@ def main():
         # v27: EarlyStopping вызов + расширенный лог
         stop = early_stopping(metrics_to_track, _underlying)
 
+        # v28: текущий lr после scheduler.step()
+        current_lr = optimizer.param_groups[0]['lr']
+
         log_msg = (
             f"Epoch {epoch:3d}/{args.epochs} | "
             f"train_loss={train_loss.avg:.4f} | val_loss={val_loss:.4f} | "
             f"{' | '.join(f'{k}={v:.4f}' for k, v in val_metrics.items() if k != 'loss')} | "
             f"ES={early_stopping.format_counters()} | "
+            f"lr={current_lr:.2e} | "
             f"{elapsed:.1f}s"
         )
         # v27: RESET-метка (если что-то улучшилось)
         reset_str = early_stopping.format_resets()
         if reset_str:
             log_msg += f" | {reset_str}"
-        # v27: метка сохранения best ckpt
+        # v28: метка лучшей эпохи (без сохранения на диск — только отметка)
         if early_stopping.last_saved:
-            log_msg += " | → Сохранён best checkpoint"
+            log_msg += " | ★ best"
         logger.info(log_msg)
 
         row = {
             "epoch": epoch,
             "train_loss": train_loss.avg,
             "val_loss": val_loss,
+            "lr": current_lr,  # v28: lr в CSV
             "elapsed": elapsed,
         }
         for k, v in train_avg_metrics.items():
@@ -411,6 +416,10 @@ def main():
     # Восстанавливаем лучшую модель (v27: в _underlying, не в обёртку DataParallel)
     early_stopping.restore_best_model(_underlying)
 
+    # v28: сохранение best ckpt на диск ОДИН РАЗ — после restore, перед test
+    torch.save(_underlying.state_dict(), ckpt_path)
+    logger.info(f"→ Сохранён best checkpoint → {ckpt_path.name}")
+
     # === Test ===
     logger.info("\n=== Финальная оценка на test ===")
     test_metrics = evaluate(model, test_loader, device, args, logger, prefix="test", target_stats=target_stats)
@@ -419,7 +428,10 @@ def main():
 
     # === Сохранение истории в CSV ===
     import csv
-    csv_path = f"{args.output_dir}/history_{args.model}_{args.target}.csv"  # v27: output_dir
+    # v28: дата+время в имени файла
+    from datetime import datetime
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    csv_path = f"{args.output_dir}/history_{args.model}_{args.target}_{ts}.csv"  # v28: timestamp
     if history:
         keys = list(history[0].keys())
         # Добавляем test-метрики в последнюю строку

@@ -20,12 +20,12 @@ data/alchemy/
 checkpoints/
 logs/
 
-# Results (keep structure, ignore files)
-# results/history_*.csv
-# results/figures/*.png
-# results/figures/*.pdf
-# results/experiments/*
-# !results/experiments/.gitkeep
+Results (keep structure, ignore files)
+results/history_*.csv
+results/figures/*.png
+results/figures/*.pdf
+results/experiments/*
+!results/experiments/.gitkeep
 *.log
 
 # Kaggle
