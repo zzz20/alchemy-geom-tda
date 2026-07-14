@@ -17,7 +17,7 @@ data/alchemy/
 *.sdf
 *.pt
 *.pth
-checkpoints/
+# checkpoints/
 logs/
 
 # Results — игнорируем мусор от smoke-тестов, но сохраняем batch_size_*
